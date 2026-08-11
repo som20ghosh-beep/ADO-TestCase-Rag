@@ -1,0 +1,23 @@
+[project]
+name = "ado-testcase-rag"
+version = "0.1.0"
+description = "Syncs Test Case work items from Azure DevOps into a local SQLite database, as groundwork for search/RAG over the test catalog."
+requires-python = ">=3.13"
+dependencies = [
+    "typer",
+    "azure-devops",
+    "msrest",
+    "tenacity",
+    "sqlmodel",
+    "lxml",
+    "python-dotenv",
+    "sentence-transformers>=5.6.1",
+    "qdrant-client>=1.18.0",
+    "tqdm>=4.70.0",
+    "fastembed>=0.8.0",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.1",
+    "chainlit>=2.11.1",
+    "anthropic>=0.121.0",
+    "groq>=1.6.0",
+]

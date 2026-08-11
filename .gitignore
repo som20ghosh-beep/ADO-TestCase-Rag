@@ -1,0 +1,20 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Local data — SQLite DB, Qdrant storage, and eval queries all contain
+# real content synced from the internal ADO project, not sample data.
+data/
+
+# Runtime logs
+*.log
+
+# Chainlit runtime file cache (chat upload attachments)
+.files/
+
+# uv
+.python-version
