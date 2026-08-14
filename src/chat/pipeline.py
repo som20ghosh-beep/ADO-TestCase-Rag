@@ -5,6 +5,12 @@ from typing import Iterator
 from src.llm.base import LLMClient
 from src.chat.prompts import build_messages
 
+MIN_SCORE = 0.4
+
+def _filter_weak_results(results: list[dict]) -> list[dict]:
+    """Drop results scoring below the relevance threshold."""
+    return [r for r in results if r.get("score", 0) >= MIN_SCORE]
+
 class ChatPipeline:
     def __init__(self, llm: LLMClient, search_api_url: str = "http://localhost:8001"):
         self.llm = llm
@@ -37,17 +43,19 @@ class ChatPipeline:
             yield {"type": "text", "data": "I couldn't find any test cases matching your query. Try rephrasing, or add filters like `feature:X`."}
             return
 
-        # Yield retrieval results first so UI can show "sources" before text streams
-        yield {"type": "sources", "data": search_result["results"]}
+        # Drop results below the relevance threshold
+        results = _filter_weak_results(search_result["results"])
+        if not results:
+            yield {"type": "text", "data": "I couldn't find any test cases matching your query. Try rephrasing, or add filters like `feature:X`."}
+            return
 
-        top_score = search_result["results"][0]["score"]
-        if top_score < 0.4:
-            yield {"type": "text", "data": f"⚠️ Weak match (top score: {top_score:.2f}). Results may be off-topic:\n\n"}
+        # Yield retrieval results first so UI can show "sources" before text streams
+        yield {"type": "sources", "data": results}
 
         # 2. Build prompt
         system, messages = build_messages(
             question=question,
-            results=search_result["results"],
+            results=results,
             history=history,
         )
 
@@ -62,7 +70,7 @@ class ChatPipeline:
             "type": "done",
             "data": {
                 "answer": full_text,
-                "retrieved_ids": [r["test_case_id"] for r in search_result["results"]],
+                "retrieved_ids": [r["test_case_id"] for r in results],
                 "candidate_count": search_result["candidate_count"],
             },
         }
