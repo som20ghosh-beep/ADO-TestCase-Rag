@@ -69,3 +69,12 @@ class ChatFeedback(SQLModel, table=True):
     comment: Optional[str] = None
     llm_provider: str
     created_at: datetime
+
+class DuplicatePair(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_case_a: int = Field(index=True)   # always the smaller ADO ID
+    test_case_b: int = Field(index=True)   # always the larger ADO ID
+    similarity: float
+    status: str = Field(default="pending", index=True)  # pending | confirmed | dismissed
+    scanned_at: datetime
+    reviewed_at: Optional[datetime] = None

@@ -8,6 +8,8 @@ from sqlmodel import Session, func, select
 from .db import engine, get_session, init_db
 from .models import EvalQuery, SyncRun, TestCase
 from .sync import run_sync
+from src.dedup.scanner import scan_for_duplicates
+from src.dedup.service import get_pairs_with_titles, review_pair
 from src.embedding.indexer import index_all
 from src.embedding.embedder import Embedder
 from src.embedding.qdrant import get_qdrant
@@ -148,6 +150,36 @@ def eval_import(csv_path: str):
     finally:
         session.close()
     typer.echo(f"imported {imported} eval queries from {csv_path}")
+
+@app.command()
+def dupes_scan(threshold: float = 0.92):
+    """Scan all indexed test cases for near-duplicate pairs."""
+    init_db()
+    result = scan_for_duplicates(get_qdrant(), engine, threshold)
+    print(
+        f"Scanned {result['total_cases']} cases -> "
+        f"{result['pairs_found']} pairs >= {threshold} "
+        f"({result['new_pairs']} new)"
+    )
+
+@app.command()
+def dupes_list(status: str = "pending", limit: int = 20):
+    """List duplicate pairs for review, highest similarity first."""
+    init_db()
+    pairs = get_pairs_with_titles(engine, status=status, limit=limit)
+    if not pairs:
+        print(f"No pairs with status '{status}'.")
+        return
+    for p in pairs:
+        print(f"\n[{p['similarity']:.3f}] pair #{p['pair_id']} ({p['status']})")
+        print(f"  TC-{p['test_case_a']['id']}: {p['test_case_a']['title']}")
+        print(f"  TC-{p['test_case_b']['id']}: {p['test_case_b']['title']}")
+
+@app.command()
+def dupes_review(pair_id: int, decision: str):
+    """Mark a pair as confirmed or dismissed."""
+    ok = review_pair(engine, pair_id, decision)
+    print(f"Pair #{pair_id} -> {decision}" if ok else f"Pair #{pair_id} not found.")
 
 if __name__ == "__main__":
     app()

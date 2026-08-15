@@ -10,6 +10,7 @@ from sqlmodel import Session
 from src.chat.pipeline import ChatPipeline
 from src.chat.validator import validate_citations
 from src.db import engine
+from src.dedup.service import get_pairs_with_titles
 from src.llm.factory import get_llm
 from src.models import ChatFeedback, TestCase
 
@@ -27,12 +28,24 @@ def _clear_action() -> cl.Action:
         tooltip="Clear the conversation history",
     )
 
+def _duplicates_action() -> cl.Action:
+    return cl.Action(
+        name="show_duplicates",
+        payload={},
+        label="Show duplicate test cases",
+        icon="copy",
+        tooltip="Show the top 30 pending duplicate test case pairs",
+    )
+
+def _default_actions() -> list[cl.Action]:
+    return [_clear_action(), _duplicates_action()]
+
 @cl.on_chat_start
 async def start():
     cl.user_session.set("history", [])
     await cl.Message(
         content="👋 Ask me about your test cases. I'll search the ADO index and cite the results.",
-        actions=[_clear_action()],
+        actions=_default_actions(),
     ).send()
 
 @cl.action_callback("clear_history")
@@ -42,8 +55,23 @@ async def on_clear_history(action: cl.Action):
         await message.remove()
     await cl.Message(
         content="🧹 Conversation history cleared. Ask me anything about your test cases.",
-        actions=[_clear_action()],
+        actions=_default_actions(),
     ).send()
+
+@cl.action_callback("show_duplicates")
+async def on_show_duplicates(action: cl.Action):
+    pairs = get_pairs_with_titles(engine, status="pending", limit=30)
+    if not pairs:
+        await cl.Message(content="No pending duplicate pairs found.").send()
+        return
+
+    lines = ["### Duplicate Test Cases — Top 30 Pending Pairs\n"]
+    for p in pairs:
+        lines.append(f"**[{p['similarity']:.3f}] Pair #{p['pair_id']}**")
+        lines.append(f"- TC-{p['test_case_a']['id']}: {p['test_case_a']['title']}")
+        lines.append(f"- TC-{p['test_case_b']['id']}: {p['test_case_b']['title']}")
+        lines.append("")
+    await cl.Message(content="\n".join(lines)).send()
 
 @cl.on_message
 async def on_message(msg: cl.Message):
@@ -80,7 +108,7 @@ async def on_message(msg: cl.Message):
                 badge = f"⚠️ Warning: {len(validation['hallucinated_ids'])} unverified IDs: {validation['hallucinated_ids']}"
             await answer_msg.stream_token(f"\n\n_{badge}_")
 
-    answer_msg.actions = [_clear_action()]
+    answer_msg.actions = _default_actions()
     await answer_msg.send()
 
     # Update history — keep last 6 turns to avoid context bloat

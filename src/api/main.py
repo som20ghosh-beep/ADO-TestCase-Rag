@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from src.db import get_session, init_db
+from src.db import engine, get_session, init_db
 from src.embedding.embedder import Embedder
 from src.embedding.qdrant import get_qdrant
 from src.embedding.sparse import SparseEncoder
@@ -15,6 +15,8 @@ from src.models import QueryLog
 from src.retrieval.reranker import Reranker
 from src.retrieval.retriever import HybridRetriever
 from src.retrieval.service import SearchService
+from src.dedup.service import review_pair, get_pairs_with_titles
+from src.dedup.scanner import scan_for_duplicates
 
 log = logging.getLogger(__name__)
 
@@ -98,3 +100,30 @@ def _log_query(req: SearchRequest, result: dict, latency_ms: int) -> None:
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+class ReviewRequest(BaseModel):
+    decision: str  # "confirmed" | "dismissed"
+
+
+@app.get("/duplicates")
+def list_duplicates(status: str = "pending", limit: int = 50):
+    return {
+        "status_filter": status,
+        "pairs": get_pairs_with_titles(engine, status=status, limit=limit),
+    }
+
+
+@app.post("/duplicates/{pair_id}/review")
+def review_duplicate(pair_id: int, req: ReviewRequest):
+    if req.decision not in ("confirmed", "dismissed"):
+        raise HTTPException(400, "decision must be 'confirmed' or 'dismissed'")
+    ok = review_pair(engine, pair_id, req.decision)
+    if not ok:
+        raise HTTPException(404, f"pair {pair_id} not found")
+    return {"pair_id": pair_id, "status": req.decision}
+
+
+@app.post("/duplicates/scan")
+def trigger_scan(threshold: float = 0.92):
+    """Manual trigger — for 5K cases this runs in seconds, fine to keep synchronous."""
+    return scan_for_duplicates(app.state.qdrant, engine, threshold)
