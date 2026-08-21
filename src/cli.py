@@ -1,12 +1,13 @@
 # src/cli.py
 import csv
+import json
 from datetime import datetime
 
 import typer
 from sqlmodel import Session, func, select
 
 from .db import engine, get_session, init_db
-from .models import EvalQuery, SyncRun, TestCase
+from .models import ChatFeedback, EvalQuery, QueryLog, ResultFeedback, SyncRun, TestCase
 from .sync import run_sync
 from src.dedup.scanner import scan_for_duplicates
 from src.dedup.service import get_pairs_with_titles, review_pair
@@ -14,6 +15,12 @@ from src.embedding.indexer import index_all
 from src.embedding.embedder import Embedder
 from src.embedding.qdrant import get_qdrant
 from src.embedding.collection import COLLECTION_NAME
+from src.embedding.sparse import SparseEncoder
+from src.eval.runner import run_eval
+from src.retrieval.reranker import Reranker
+from src.retrieval.retriever import HybridRetriever
+from src.retrieval.service import SearchService
+from src.rewrite.rewriter import QueryRewriter
 
 app = typer.Typer()
 
@@ -125,6 +132,75 @@ def index_stats():
         total = s.exec(select(func.count(TestCase.id))).one()
         print(f"Embedded in SQLite: {embedded}/{total}")
 
+@app.command("feedback-stats")
+def feedback_stats():
+    """Show aggregate stats from the result and chat feedback tables."""
+    init_db()
+    session = get_session()
+
+    result_total = session.exec(select(func.count()).select_from(ResultFeedback)).one()
+    typer.echo(f"result feedback: {result_total} total")
+    if result_total:
+        by_verdict = session.exec(
+            select(ResultFeedback.verdict, func.count())
+            .group_by(ResultFeedback.verdict)
+            .order_by(func.count().desc())
+        ).all()
+        for verdict, count in by_verdict:
+            typer.echo(f"  {verdict}: {count} ({count / result_total:.1%})")
+
+    typer.echo("")
+    chat_total = session.exec(select(func.count()).select_from(ChatFeedback)).one()
+    typer.echo(f"chat feedback: {chat_total} total")
+    if chat_total:
+        by_verdict = session.exec(
+            select(ChatFeedback.feedback, func.count())
+            .group_by(ChatFeedback.feedback)
+            .order_by(func.count().desc())
+        ).all()
+        for verdict, count in by_verdict:
+            typer.echo(f"  {verdict}: {count} ({count / chat_total:.1%})")
+
+        grounded = session.exec(
+            select(func.count()).select_from(ChatFeedback).where(ChatFeedback.is_grounded == True)
+        ).one()
+        typer.echo(f"  grounded: {grounded}/{chat_total} ({grounded / chat_total:.1%})")
+
+@app.command("feedback-export-eval")
+def feedback_export_eval():
+    """Turn up-voted ResultFeedback into eval_query rows (query -> correct_ids)."""
+    init_db()
+    session = get_session()
+
+    rows = session.exec(
+        select(QueryLog.query, ResultFeedback.test_case_id)
+        .join(ResultFeedback, ResultFeedback.query_log_id == QueryLog.id)
+        .where(ResultFeedback.verdict == "up")
+    ).all()
+
+    by_query: dict[str, set[int]] = {}
+    for query, test_case_id in rows:
+        by_query.setdefault(query, set()).add(test_case_id)
+
+    existing = set(session.exec(select(EvalQuery.query)).all())
+
+    imported = 0
+    skipped = 0
+    for query, ids in by_query.items():
+        if query in existing:
+            skipped += 1
+            continue
+        session.add(EvalQuery(
+            query=query,
+            correct_ids=",".join(str(i) for i in sorted(ids)),
+            notes="from feedback (up-voted results)",
+            created_at=datetime.utcnow(),
+        ))
+        imported += 1
+    session.commit()
+
+    typer.echo(f"exported {imported} eval queries from feedback ({skipped} already present, skipped)")
+
 @app.command("eval-import")
 def eval_import(csv_path: str):
     """Load eval queries (query, correct_ids, notes) from a CSV into the eval_query table."""
@@ -180,6 +256,42 @@ def dupes_review(pair_id: int, decision: str):
     """Mark a pair as confirmed or dismissed."""
     ok = review_pair(engine, pair_id, decision)
     print(f"Pair #{pair_id} -> {decision}" if ok else f"Pair #{pair_id} not found.")
+
+@app.command()
+def rewrite_test(query: str):
+    """See what the LLM does to a query, without searching."""
+    r = QueryRewriter().rewrite(query)
+    print(json.dumps(r, indent=2))
+
+@app.command("eval-run")
+def eval_run(top_k: int = 8):
+    """Run all retrieval variants (baseline/rerank/rewrite/both) against the eval_query set
+    and report precision@k, recall@k, MRR, and hit rate for each."""
+    init_db()
+
+    qdrant = get_qdrant()
+    embedder = Embedder()
+    sparse_encoder = SparseEncoder()
+    retriever = HybridRetriever(qdrant, embedder, sparse_encoder)
+    reranker = Reranker()
+    rewriter = QueryRewriter()
+    search_service = SearchService(retriever, reranker, rewriter)
+
+    report = run_eval(search_service, top_k=top_k)
+
+    if not report:
+        typer.echo("No eval queries found. Load some with `eval-import` first.")
+        raise typer.Exit(code=1)
+
+    header = f"{'variant':<16} {'n':>4} {'hit_rate':>9} {'precision@k':>12} {'recall@k':>9} {'mrr':>6}"
+    typer.echo(header)
+    typer.echo("-" * len(header))
+    for row in report:
+        typer.echo(
+            f"{row['variant']:<16} {row['n']:>4} "
+            f"{row['hit_rate']:>9.3f} {row['precision']:>12.3f} "
+            f"{row['recall']:>9.3f} {row['mrr']:>6.3f}"
+        )
 
 if __name__ == "__main__":
     app()

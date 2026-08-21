@@ -78,3 +78,12 @@ class DuplicatePair(SQLModel, table=True):
     status: str = Field(default="pending", index=True)  # pending | confirmed | dismissed
     scanned_at: datetime
     reviewed_at: Optional[datetime] = None
+
+class ResultFeedback(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    query_log_id: int = Field(index=True, foreign_key="querylog.id")
+    test_case_id: int = Field(index=True)      # the ADO ID of the result being judged
+    verdict: str = Field(index=True)           # "up" | "down"
+    rank_position: Optional[int] = None        # where it appeared in results (1-based)
+    user: Optional[str] = None                 # who gave feedback (Teams user, etc.)
+    created_at: datetime

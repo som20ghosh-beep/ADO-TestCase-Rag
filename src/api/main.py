@@ -6,8 +6,9 @@ from datetime import datetime
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from sqlmodel import Session
 
-from src.db import engine, get_session, init_db
+from src.db import engine, init_db
 from src.embedding.embedder import Embedder
 from src.embedding.qdrant import get_qdrant
 from src.embedding.sparse import SparseEncoder
@@ -17,6 +18,7 @@ from src.retrieval.retriever import HybridRetriever
 from src.retrieval.service import SearchService
 from src.dedup.service import review_pair, get_pairs_with_titles
 from src.dedup.scanner import scan_for_duplicates
+from src.feedback.service import record_feedback, feedback_stats
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +28,7 @@ class SearchRequest(BaseModel):
     feature: str | None = None
     state: str | None = None
     rerank: bool = True
+    rewrite: bool = True          
 
 class SearchResult(BaseModel):
     test_case_id: int
@@ -43,6 +46,7 @@ class SearchResponse(BaseModel):
     candidate_count: int
     results: list[SearchResult]
     latency_ms: int
+    query_log_id: int
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -73,17 +77,16 @@ def search(req: SearchRequest):
         )
         latency = int((time.perf_counter() - start) * 1000)
         log.info("search: query=%r latency_ms=%d results=%d", req.query, latency, len(result["results"]))
-        _log_query(req, result, latency)  # persist to SQLite for observability
-        return {**result, "latency_ms": latency}
+        qlog_id = _log_query(req, result, latency)
+        return {**result, "latency_ms": latency, "query_log_id": qlog_id}
     except Exception as e:
         log.error("search_failed: query=%r error=%s", req.query, e)
         raise HTTPException(500, str(e))
 
 
 def _log_query(req: SearchRequest, result: dict, latency_ms: int) -> None:
-    session = get_session()
-    try:
-        session.add(QueryLog(
+    with Session(engine) as s:
+        qlog = QueryLog(
             query=req.query,
             filters=result.get("filters", {}),
             top_k=req.top_k,
@@ -92,10 +95,12 @@ def _log_query(req: SearchRequest, result: dict, latency_ms: int) -> None:
             result_count=len(result["results"]),
             latency_ms=latency_ms,
             created_at=datetime.utcnow(),
-        ))
-        session.commit()
-    finally:
-        session.close()
+        )
+        s.add(qlog)
+        s.commit()
+        s.refresh(qlog)          # populates qlog.id after insert
+        return qlog.id
+
 
 @app.get("/health")
 def health():
@@ -127,3 +132,42 @@ def review_duplicate(pair_id: int, req: ReviewRequest):
 def trigger_scan(threshold: float = 0.92):
     """Manual trigger — for 5K cases this runs in seconds, fine to keep synchronous."""
     return scan_for_duplicates(app.state.qdrant, engine, threshold)
+
+
+class FeedbackRequest(BaseModel):
+    query_log_id: int
+    test_case_id: int
+    verdict: str
+    rank_position: int | None = None
+    user: str | None = None
+
+
+@app.post("/feedback")
+def submit_feedback(req: FeedbackRequest):
+    try:
+        fb = record_feedback(
+            engine,
+            query_log_id=req.query_log_id,
+            test_case_id=req.test_case_id,
+            verdict=req.verdict,
+            rank_position=req.rank_position,
+            user=req.user,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    return {
+        "id": fb.id,
+        "query_log_id": fb.query_log_id,
+        "test_case_id": fb.test_case_id,
+        "verdict": fb.verdict,
+        "rank_position": fb.rank_position,
+        "user": fb.user,
+        "created_at": fb.created_at.isoformat(),
+    }
+
+
+@app.get("/feedback/stats")
+def get_feedback_stats():
+    return feedback_stats(engine)

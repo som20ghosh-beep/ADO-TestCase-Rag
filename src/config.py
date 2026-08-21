@@ -17,3 +17,7 @@ DB_PATH = BASE_DIR / "data" / "testcases.db"
 
 QDRANT_HOST = os.environ.get("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.environ.get("QDRANT_PORT", "6333"))
+
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+REWRITE_MODEL = os.getenv("REWRITE_MODEL", "qwen2.5:3b")
+REWRITE_TIMEOUT_S = float(os.getenv("REWRITE_TIMEOUT_S", "5.0"))

@@ -20,4 +20,6 @@ dependencies = [
     "chainlit>=2.11.1",
     "anthropic>=0.121.0",
     "groq>=1.6.0",
+    "ollama>=0.6.2",
+    "structlog>=26.1.0",
 ]
